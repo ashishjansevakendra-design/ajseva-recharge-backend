@@ -8,79 +8,78 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const PORT = process.env.PORT || 10000;
 
 // ======================================================
-// EPAYYATRA
+// ENVIRONMENT VARIABLES
+// ======================================================
+
+const PORT = process.env.PORT || 10000;
+
+
+// ======================================================
+// EPAYYATRA CONFIG
 // ======================================================
 
 const EPAY_USERNAME = process.env.EPAY_USERNAME;
 const EPAY_API_TOKEN = process.env.EPAY_API_TOKEN;
 const EPAY_PIN = process.env.EPAY_PIN;
 
+
 // ======================================================
-// RAZORPAY
+// RAZORPAY CONFIG
 // ======================================================
 
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const RAZORPAY_KEY_ID =
+    process.env.RAZORPAY_KEY_ID;
+
+const RAZORPAY_KEY_SECRET =
+    process.env.RAZORPAY_KEY_SECRET;
+
 
 // ======================================================
 // TEMPORARY WALLET STORAGE
+// ======================================================
+//
 // IMPORTANT:
-// Later we will move this to Firebase/Firestore.
+// यह अभी testing के लिए है।
+// Render restart होने पर data reset हो सकता है।
+//
+// बाद में Firebase Firestore जोड़ेंगे।
 // ======================================================
 
 const wallets = new Map();
-const walletTransactions = new Map();
-const paymentOrders = new Map();
+
 
 // ======================================================
-// HELPER
+// PAYMENT / ORDER STORAGE
 // ======================================================
 
-function getUserKey(req) {
-    const userId =
-        req.body?.userId ||
-        req.query?.userId;
+const walletOrders = new Map();
 
-    if (!userId) return null;
-
-    return String(userId);
-}
-
-function getWallet(userId) {
-
-    if (!wallets.has(userId)) {
-        wallets.set(userId, 0);
-    }
-
-    return Number(wallets.get(userId));
-}
-
-function setWallet(userId, amount) {
-    wallets.set(
-        userId,
-        Number(Number(amount).toFixed(2))
-    );
-}
 
 // ======================================================
-// BASIC HEALTH
+// HEALTH / BASIC
 // ======================================================
 
 app.get("/", (req, res) => {
 
     res.json({
+
         success: true,
-        message: "AJ Seva Recharge Backend is running",
-        status: "online"
+
+        message:
+            "AJ Seva Recharge Backend is running",
+
+        status:
+            "online"
+
     });
 
 });
 
+
 // ======================================================
-// HEALTH
+// HEALTH CHECK
 // ======================================================
 
 app.get("/health", (req, res) => {
@@ -89,7 +88,8 @@ app.get("/health", (req, res) => {
 
         success: true,
 
-        backend: "online",
+        backend:
+            "online",
 
         epay_configured:
             !!EPAY_USERNAME &&
@@ -104,549 +104,788 @@ app.get("/health", (req, res) => {
 
 });
 
-// ======================================================
-// WALLET BALANCE
-// ======================================================
-
-app.get("/api/wallet/balance", (req, res) => {
-
-    try {
-
-        const userId =
-            getUserKey(req);
-
-        if (!userId) {
-
-            return res.status(400).json({
-                success: false,
-                message: "userId is required"
-            });
-
-        }
-
-        const balance =
-            getWallet(userId);
-
-        return res.json({
-
-            success: true,
-
-            userId,
-
-            balance: balance.toFixed(2)
-
-        });
-
-    } catch (error) {
-
-        return res.status(500).json({
-
-            success: false,
-
-            message: error.message
-
-        });
-
-    }
-
-});
 
 // ======================================================
-// WALLET TRANSACTIONS
+// RAZORPAY AUTH HEADER
 // ======================================================
 
-app.get("/api/wallet/transactions", (req, res) => {
+function razorpayAuthHeader() {
 
-    try {
+    const token =
+        `${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`;
 
-        const userId =
-            getUserKey(req);
+    return "Basic " +
+        Buffer
+            .from(token)
+            .toString("base64");
+}
 
-        if (!userId) {
-
-            return res.status(400).json({
-                success: false,
-                message: "userId is required"
-            });
-
-        }
-
-        const transactions =
-            walletTransactions.get(userId) || [];
-
-        return res.json({
-
-            success: true,
-
-            transactions
-
-        });
-
-    } catch (error) {
-
-        return res.status(500).json({
-
-            success: false,
-
-            message: error.message
-
-        });
-
-    }
-
-});
 
 // ======================================================
 // CREATE RAZORPAY ORDER
 // ======================================================
+//
+// POST /api/wallet/create-order
+//
+// Body:
+//
+// {
+//     "amount": 100,
+//     "userId": "customer123"
+// }
+//
+// ======================================================
 
-app.post("/api/wallet/create-order", async (req, res) => {
+app.post(
+    "/api/wallet/create-order",
+    async (req, res) => {
 
-    try {
+        try {
 
-        const {
-            userId,
-            amount
-        } = req.body;
+            const {
+                amount,
+                userId
+            } = req.body;
 
-        if (!userId) {
 
-            return res.status(400).json({
-                success: false,
-                message: "userId is required"
+            // ----------------------------------------------
+            // VALIDATION
+            // ----------------------------------------------
+
+            const numericAmount =
+                Number(amount);
+
+
+            if (
+                !Number.isFinite(numericAmount) ||
+                numericAmount < 10
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "Minimum wallet amount is ₹10"
+
+                });
+
+            }
+
+
+            if (!RAZORPAY_KEY_ID ||
+                !RAZORPAY_KEY_SECRET) {
+
+                return res.status(500).json({
+
+                    success: false,
+
+                    message:
+                        "Razorpay is not configured on server"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // AMOUNT IN PAISE
+            // ----------------------------------------------
+
+            const amountInPaise =
+                Math.round(
+                    numericAmount * 100
+                );
+
+
+            // ----------------------------------------------
+            // UNIQUE RECEIPT
+            // ----------------------------------------------
+
+            const receipt =
+                "AJWALLET" +
+                Date.now();
+
+
+            // ----------------------------------------------
+            // RAZORPAY ORDER DATA
+            // ----------------------------------------------
+
+            const orderData = {
+
+                amount:
+                    amountInPaise,
+
+                currency:
+                    "INR",
+
+                receipt:
+                    receipt,
+
+                notes: {
+
+                    userId:
+                        String(userId || ""),
+
+                    purpose:
+                        "wallet_add_money",
+
+                    walletAmount:
+                        String(numericAmount)
+
+                }
+
+            };
+
+
+            // ----------------------------------------------
+            // CREATE RAZORPAY ORDER
+            // ----------------------------------------------
+
+            const response =
+                await fetch(
+                    "https://api.razorpay.com/v1/orders",
+                    {
+
+                        method:
+                            "POST",
+
+                        headers: {
+
+                            "Authorization":
+                                razorpayAuthHeader(),
+
+                            "Content-Type":
+                                "application/json",
+
+                            "Accept":
+                                "application/json"
+
+                        },
+
+                        body:
+                            JSON.stringify(
+                                orderData
+                            )
+
+                    }
+                );
+
+
+            const data =
+                await response.json();
+
+
+            // ----------------------------------------------
+            // RAZORPAY ERROR
+            // ----------------------------------------------
+
+            if (!response.ok) {
+
+                console.error(
+                    "Razorpay Order Error:",
+                    data
+                );
+
+                return res.status(502).json({
+
+                    success: false,
+
+                    message:
+                        data?.error?.description ||
+                        "Unable to create Razorpay order",
+
+                    provider_response:
+                        data
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // SAVE ORDER
+            // ----------------------------------------------
+
+            walletOrders.set(
+                data.id,
+                {
+
+                    orderId:
+                        data.id,
+
+                    userId:
+                        String(userId || ""),
+
+                    amount:
+                        numericAmount,
+
+                    amountInPaise:
+                        amountInPaise,
+
+                    status:
+                        "created",
+
+                    credited:
+                        false,
+
+                    createdAt:
+                        Date.now()
+
+                }
+            );
+
+
+            // ----------------------------------------------
+            // SEND ORDER TO APP
+            // ----------------------------------------------
+
+            return res.json({
+
+                success: true,
+
+                order_id:
+                    data.id,
+
+                amount:
+                    data.amount,
+
+                amount_rupees:
+                    numericAmount,
+
+                currency:
+                    data.currency,
+
+                key_id:
+                    RAZORPAY_KEY_ID,
+
+                status:
+                    data.status
+
             });
 
-        }
+        } catch (error) {
 
-        const numericAmount =
-            Number(amount);
-
-        if (
-            !Number.isFinite(numericAmount) ||
-            numericAmount < 10 ||
-            numericAmount > 100000
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                message:
-                    "Amount must be between ₹10 and ₹100000"
-
-            });
-
-        }
-
-        if (
-            !RAZORPAY_KEY_ID ||
-            !RAZORPAY_KEY_SECRET
-        ) {
+            console.error(
+                "Create Order Error:",
+                error
+            );
 
             return res.status(500).json({
 
                 success: false,
 
                 message:
-                    "Razorpay is not configured on server"
+                    error.message ||
+                    "Server error while creating order"
 
             });
 
         }
-
-        const receipt =
-            `AJSEVA_${Date.now()}`;
-
-        const amountInPaise =
-            Math.round(
-                numericAmount * 100
-            );
-
-        const auth =
-            Buffer
-                .from(
-                    `${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`
-                )
-                .toString("base64");
-
-        const response =
-            await fetch(
-                "https://api.razorpay.com/v1/orders",
-                {
-
-                    method: "POST",
-
-                    headers: {
-
-                        "Content-Type":
-                            "application/json",
-
-                        "Authorization":
-                            `Basic ${auth}`
-
-                    },
-
-                    body:
-                        JSON.stringify({
-
-                            amount:
-                                amountInPaise,
-
-                            currency:
-                                "INR",
-
-                            receipt,
-
-                            notes: {
-                                userId:
-                                    String(userId)
-                            }
-
-                        })
-
-                }
-            );
-
-        const data =
-            await response.json();
-
-        if (!response.ok) {
-
-            return res.status(502).json({
-
-                success: false,
-
-                message:
-                    data?.error?.description ||
-                    "Unable to create Razorpay order",
-
-                provider_response:
-                    data
-
-            });
-
-        }
-
-        paymentOrders.set(
-            data.id,
-            {
-                userId:
-                    String(userId),
-
-                amount:
-                    numericAmount,
-
-                status:
-                    "created"
-            }
-        );
-
-        return res.json({
-
-            success: true,
-
-            keyId:
-                RAZORPAY_KEY_ID,
-
-            orderId:
-                data.id,
-
-            amount:
-                amountInPaise,
-
-            amountRupees:
-                numericAmount,
-
-            currency:
-                "INR"
-
-        });
-
-    } catch (error) {
-
-        console.error(
-            "Create order error:",
-            error
-        );
-
-        return res.status(500).json({
-
-            success: false,
-
-            message:
-                error.message
-
-        });
 
     }
+);
 
-});
 
 // ======================================================
 // VERIFY RAZORPAY PAYMENT
 // ======================================================
+//
+// POST /api/wallet/verify-payment
+//
+// Body:
+//
+// {
+//     "razorpay_order_id": "...",
+//     "razorpay_payment_id": "...",
+//     "razorpay_signature": "..."
+// }
+//
+// ======================================================
 
-app.post("/api/wallet/verify-payment", async (req, res) => {
+app.post(
+    "/api/wallet/verify-payment",
+    async (req, res) => {
 
-    try {
+        try {
 
-        const {
-            userId,
-            razorpay_order_id,
-            razorpay_payment_id,
-            razorpay_signature
-        } = req.body;
+            const {
 
-        if (
-            !userId ||
-            !razorpay_order_id ||
-            !razorpay_payment_id ||
-            !razorpay_signature
-        ) {
+                razorpay_order_id,
 
-            return res.status(400).json({
+                razorpay_payment_id,
 
-                success: false,
+                razorpay_signature
 
-                message:
-                    "Payment verification data is incomplete"
+            } = req.body;
 
-            });
 
-        }
+            // ----------------------------------------------
+            // VALIDATION
+            // ----------------------------------------------
 
-        const order =
-            paymentOrders.get(
-                razorpay_order_id
-            );
+            if (
+                !razorpay_order_id ||
+                !razorpay_payment_id ||
+                !razorpay_signature
+            ) {
 
-        if (!order) {
+                return res.status(400).json({
 
-            return res.status(400).json({
+                    success: false,
 
-                success: false,
+                    message:
+                        "Payment verification data is incomplete"
 
-                message:
-                    "Razorpay order not found"
+                });
 
-            });
+            }
 
-        }
 
-        if (
-            order.userId !==
-            String(userId)
-        ) {
+            // ----------------------------------------------
+            // FIND SERVER ORDER
+            // ----------------------------------------------
 
-            return res.status(403).json({
+            const order =
+                walletOrders.get(
+                    razorpay_order_id
+                );
 
-                success: false,
 
-                message:
-                    "User does not match order"
+            if (!order) {
 
-            });
+                return res.status(404).json({
 
-        }
+                    success: false,
 
-        const generatedSignature =
-            crypto
-                .createHmac(
-                    "sha256",
-                    RAZORPAY_KEY_SECRET
-                )
-                .update(
-                    `${razorpay_order_id}|${razorpay_payment_id}`
-                )
-                .digest("hex");
+                    message:
+                        "Order not found on server"
 
-        const valid =
-            crypto.timingSafeEqual(
-                Buffer.from(
-                    generatedSignature,
-                    "utf8"
-                ),
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // PREVENT DOUBLE CREDIT
+            // ----------------------------------------------
+
+            if (order.credited) {
+
+                const currentBalance =
+                    wallets.get(
+                        order.userId
+                    ) || 0;
+
+                return res.json({
+
+                    success: true,
+
+                    already_processed:
+                        true,
+
+                    message:
+                        "Payment already processed",
+
+                    wallet_balance:
+                        currentBalance
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // CREATE SIGNATURE
+            // ----------------------------------------------
+
+            const body =
+                razorpay_order_id +
+                "|" +
+                razorpay_payment_id;
+
+
+            const expectedSignature =
+                crypto
+                    .createHmac(
+                        "sha256",
+                        RAZORPAY_KEY_SECRET
+                    )
+                    .update(body)
+                    .digest("hex");
+
+
+            // ----------------------------------------------
+            // SAFE SIGNATURE COMPARE
+            // ----------------------------------------------
+
+            const receivedBuffer =
                 Buffer.from(
                     razorpay_signature,
                     "utf8"
-                )
+                );
+
+            const expectedBuffer =
+                Buffer.from(
+                    expectedSignature,
+                    "utf8"
+                );
+
+
+            const signatureValid =
+                receivedBuffer.length ===
+                    expectedBuffer.length &&
+                crypto.timingSafeEqual(
+                    receivedBuffer,
+                    expectedBuffer
+                );
+
+
+            if (!signatureValid) {
+
+                console.error(
+                    "Invalid Razorpay Signature"
+                );
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "Invalid payment signature"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // FETCH PAYMENT FROM RAZORPAY
+            // ----------------------------------------------
+
+            const paymentResponse =
+                await fetch(
+                    "https://api.razorpay.com/v1/payments/" +
+                    encodeURIComponent(
+                        razorpay_payment_id
+                    ),
+                    {
+
+                        method:
+                            "GET",
+
+                        headers: {
+
+                            "Authorization":
+                                razorpayAuthHeader(),
+
+                            "Accept":
+                                "application/json"
+
+                        }
+
+                    }
+                );
+
+
+            const paymentData =
+                await paymentResponse.json();
+
+
+            if (!paymentResponse.ok) {
+
+                console.error(
+                    "Payment Fetch Error:",
+                    paymentData
+                );
+
+                return res.status(502).json({
+
+                    success: false,
+
+                    message:
+                        "Unable to verify payment with Razorpay",
+
+                    provider_response:
+                        paymentData
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // CHECK ORDER ID
+            // ----------------------------------------------
+
+            if (
+                paymentData.order_id !==
+                razorpay_order_id
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "Payment order mismatch"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // CHECK AMOUNT
+            // ----------------------------------------------
+
+            if (
+                Number(paymentData.amount) !==
+                Number(order.amountInPaise)
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "Payment amount mismatch"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // CHECK PAYMENT STATUS
+            // ----------------------------------------------
+
+            const paymentStatus =
+                String(
+                    paymentData.status || ""
+                ).toLowerCase();
+
+
+            if (
+                paymentStatus !==
+                "captured"
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    payment_status:
+                        paymentStatus,
+
+                    message:
+                        "Payment is not captured yet"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // CREDIT WALLET
+            // ----------------------------------------------
+
+            const oldBalance =
+                wallets.get(
+                    order.userId
+                ) || 0;
+
+
+            const newBalance =
+                Number(
+                    (
+                        oldBalance +
+                        order.amount
+                    ).toFixed(2)
+                );
+
+
+            wallets.set(
+                order.userId,
+                newBalance
             );
 
-        if (!valid) {
 
-            return res.status(400).json({
+            // ----------------------------------------------
+            // MARK ORDER AS CREDITED
+            // ----------------------------------------------
 
-                success: false,
+            order.credited =
+                true;
 
-                message:
-                    "Invalid payment signature"
+            order.status =
+                "paid";
 
-            });
+            order.paymentId =
+                razorpay_payment_id;
 
-        }
+            order.verifiedAt =
+                Date.now();
 
-        // Prevent duplicate credit
-        if (
-            order.status ===
-            "credited"
-        ) {
+
+            walletOrders.set(
+                razorpay_order_id,
+                order
+            );
+
+
+            // ----------------------------------------------
+            // SUCCESS
+            // ----------------------------------------------
 
             return res.json({
 
                 success: true,
 
                 message:
-                    "Payment already credited",
+                    "Payment verified and wallet credited",
 
-                balance:
-                    getWallet(userId)
-                        .toFixed(2)
+                payment_id:
+                    razorpay_payment_id,
+
+                order_id:
+                    razorpay_order_id,
+
+                amount:
+                    order.amount,
+
+                wallet_balance:
+                    newBalance
+
+            });
+
+        } catch (error) {
+
+            console.error(
+                "Payment Verification Error:",
+                error
+            );
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    error.message ||
+                    "Payment verification failed"
 
             });
 
         }
 
-        const oldBalance =
-            getWallet(userId);
+    }
+);
 
-        const newBalance =
-            oldBalance +
-            Number(order.amount);
 
-        setWallet(
-            userId,
-            newBalance
-        );
+// ======================================================
+// WALLET BALANCE
+// ======================================================
+//
+// GET /api/wallet/balance?userId=xxxxx
+//
+// ======================================================
 
-        order.status =
-            "credited";
+app.get(
+    "/api/wallet/balance",
+    (req, res) => {
 
-        order.paymentId =
-            razorpay_payment_id;
+        try {
 
-        paymentOrders.set(
-            razorpay_order_id,
-            order
-        );
+            const userId =
+                String(
+                    req.query.userId || ""
+                );
 
-        const transaction = {
 
-            id:
-                `WT${Date.now()}`,
+            if (!userId) {
 
-            type:
-                "CREDIT",
+                return res.status(400).json({
 
-            amount:
-                Number(order.amount)
-                    .toFixed(2),
+                    success: false,
 
-            paymentId:
-                razorpay_payment_id,
+                    message:
+                        "userId is required"
 
-            orderId:
-                razorpay_order_id,
+                });
 
-            status:
-                "SUCCESS",
+            }
 
-            createdAt:
-                new Date().toISOString()
 
-        };
+            const balance =
+                wallets.get(
+                    userId
+                ) || 0;
 
-        const list =
-            walletTransactions.get(
-                userId
-            ) || [];
 
-        list.unshift(
-            transaction
-        );
+            return res.json({
 
-        walletTransactions.set(
-            userId,
-            list
-        );
+                success: true,
 
-        return res.json({
+                userId:
+                    userId,
 
-            success: true,
+                balance:
+                    Number(
+                        balance.toFixed(2)
+                    )
 
-            message:
-                "Wallet credited successfully",
+            });
 
-            credited:
-                Number(order.amount)
-                    .toFixed(2),
+        } catch (error) {
 
-            balance:
-                getWallet(userId)
-                    .toFixed(2),
+            return res.status(500).json({
 
-            transaction
+                success: false,
 
-        });
+                message:
+                    error.message
 
-    } catch (error) {
+            });
 
-        console.error(
-            "Payment verification error:",
-            error
-        );
-
-        return res.status(500).json({
-
-            success: false,
-
-            message:
-                error.message
-
-        });
+        }
 
     }
+);
 
-});
 
 // ======================================================
-// RECHARGE
+// WALLET TEST BALANCE
+// ======================================================
+//
+// केवल testing के लिए
+//
+// POST /api/wallet/set-test-balance
+//
+// Body:
+//
+// {
+//     "userId": "test123",
+//     "amount": 500
+// }
+//
+// बाद में इसे हटा देंगे।
 // ======================================================
 
-app.post("/api/recharge", async (req, res) => {
-
-    try {
+app.post(
+    "/api/wallet/set-test-balance",
+    (req, res) => {
 
         const {
-
             userId,
-
-            number,
-
-            amount,
-
-            operator,
-
-            ref_id,
-
-            field1,
-            field2,
-            field3,
-            field4,
-            field5
-
+            amount
         } = req.body;
 
-        // ----------------------------------------------
-        // VALIDATION
-        // ----------------------------------------------
 
         if (!userId) {
 
             return res.status(400).json({
 
                 success: false,
-
-                status: "Error",
 
                 message:
                     "userId is required"
@@ -655,329 +894,334 @@ app.post("/api/recharge", async (req, res) => {
 
         }
 
-        if (!number) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                status: "Error",
-
-                message:
-                    "Mobile number is required"
-
-            });
-
-        }
-
-        const rechargeAmount =
+        const numericAmount =
             Number(amount);
+
 
         if (
             !Number.isFinite(
-                rechargeAmount
+                numericAmount
             ) ||
-            rechargeAmount <= 0
+            numericAmount < 0
         ) {
 
             return res.status(400).json({
 
                 success: false,
 
-                status: "Error",
-
                 message:
-                    "Invalid recharge amount"
+                    "Invalid amount"
 
             });
 
         }
 
-        if (!operator) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                status: "Error",
-
-                message:
-                    "Operator code is required"
-
-            });
-
-        }
-
-        if (
-            !EPAY_USERNAME ||
-            !EPAY_API_TOKEN ||
-            !EPAY_PIN
-        ) {
-
-            return res.status(500).json({
-
-                success: false,
-
-                status: "Error",
-
-                message:
-                    "Recharge API is not configured"
-
-            });
-
-        }
-
-        // ----------------------------------------------
-        // WALLET CHECK
-        // ----------------------------------------------
-
-        const walletBalance =
-            getWallet(userId);
-
-        if (
-            walletBalance <
-            rechargeAmount
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                status:
-                    "INSUFFICIENT_WALLET",
-
-                message:
-                    "Customer wallet balance is insufficient",
-
-                walletBalance:
-                    walletBalance.toFixed(2),
-
-                required:
-                    rechargeAmount.toFixed(2)
-
-            });
-
-        }
-
-        // ----------------------------------------------
-        // REFERENCE
-        // ----------------------------------------------
-
-        const referenceId =
-            ref_id ||
-            `AJSEVA${Date.now()}`;
-
-        // ----------------------------------------------
-        // EPAYYATRA
-        // ----------------------------------------------
-
-        const apiUrl =
-            "https://www.epayyatra.com/webservices/api/recharge";
-
-        const params =
-            new URLSearchParams();
-
-        params.append(
-            "username",
-            EPAY_USERNAME
+        wallets.set(
+            String(userId),
+            Number(
+                numericAmount.toFixed(2)
+            )
         );
 
-        params.append(
-            "api_token",
-            EPAY_API_TOKEN
-        );
 
-        params.append(
-            "number",
-            String(number)
-        );
+        return res.json({
 
-        params.append(
-            "amount",
-            String(rechargeAmount)
-        );
+            success: true,
 
-        params.append(
-            "operator",
-            String(operator)
-        );
+            userId:
+                String(userId),
 
-        params.append(
-            "ref_id",
-            referenceId
-        );
+            balance:
+                numericAmount,
 
-        if (field1)
-            params.append(
-                "field1",
-                String(field1)
-            );
+            message:
+                "Test wallet balance updated"
 
-        if (field2)
-            params.append(
-                "field2",
-                String(field2)
-            );
+        });
 
-        if (field3)
-            params.append(
-                "field3",
-                String(field3)
-            );
+    }
+);
 
-        if (field4)
-            params.append(
-                "field4",
-                String(field4)
-            );
 
-        if (field5)
-            params.append(
-                "field5",
-                String(field5)
-            );
+// ======================================================
+// RECHARGE API
+// ======================================================
 
-        params.append(
-            "pin",
-            EPAY_PIN
-        );
-
-        const response =
-            await fetch(
-                `${apiUrl}?${params.toString()}`,
-                {
-
-                    method:
-                        "GET",
-
-                    headers: {
-
-                        Accept:
-                            "application/json"
-
-                    }
-
-                }
-            );
-
-        const text =
-            await response.text();
-
-        let data;
+app.post(
+    "/api/recharge",
+    async (req, res) => {
 
         try {
 
-            data =
-                JSON.parse(text);
+            const {
 
-        } catch {
+                number,
+                amount,
+                operator,
+                ref_id,
+                field1,
+                field2,
+                field3,
+                field4,
+                field5
 
-            data = {
+            } = req.body;
 
-                raw_response:
-                    text
 
-            };
+            // ----------------------------------------------
+            // VALIDATION
+            // ----------------------------------------------
 
-        }
+            if (!number) {
 
-        const providerStatus =
-            String(
-                data.status ||
-                ""
+                return res.status(400).json({
+
+                    success: false,
+
+                    status: "Error",
+
+                    message:
+                        "Mobile number is required"
+
+                });
+
+            }
+
+
+            if (!amount) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    status: "Error",
+
+                    message:
+                        "Recharge amount is required"
+
+                });
+
+            }
+
+
+            if (!operator) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    status: "Error",
+
+                    message:
+                        "Operator code is required"
+
+                });
+
+            }
+
+
+            if (
+                !EPAY_USERNAME ||
+                !EPAY_API_TOKEN ||
+                !EPAY_PIN
+            ) {
+
+                return res.status(500).json({
+
+                    success: false,
+
+                    status: "Error",
+
+                    message:
+                        "Recharge API is not configured on server"
+
+                });
+
+            }
+
+
+            // ----------------------------------------------
+            // UNIQUE REFERENCE ID
+            // ----------------------------------------------
+
+            const referenceId =
+                ref_id ||
+                `AJSEVA${Date.now()}`;
+
+
+            // ----------------------------------------------
+            // EPAYYATRA API
+            // ----------------------------------------------
+
+            const apiUrl =
+                "https://www.epayyatra.com/webservices/api/recharge";
+
+
+            // ----------------------------------------------
+            // PARAMETERS
+            // ----------------------------------------------
+
+            const params =
+                new URLSearchParams();
+
+
+            params.append(
+                "username",
+                EPAY_USERNAME
             );
 
-        const rechargeSuccess =
-            response.ok &&
-            (
-                providerStatus
-                    .toLowerCase()
-                    === "success"
+
+            params.append(
+                "api_token",
+                EPAY_API_TOKEN
             );
 
-        // ----------------------------------------------
-        // SUCCESS → DEDUCT WALLET
-        // ----------------------------------------------
 
-        if (rechargeSuccess) {
-
-            const currentBalance =
-                getWallet(userId);
-
-            const newBalance =
-                currentBalance -
-                rechargeAmount;
-
-            setWallet(
-                userId,
-                newBalance
+            params.append(
+                "number",
+                String(number)
             );
 
-            const transaction = {
 
-                id:
-                    `WT${Date.now()}`,
+            params.append(
+                "amount",
+                String(amount)
+            );
 
-                type:
-                    "DEBIT",
 
-                amount:
-                    rechargeAmount
-                        .toFixed(2),
+            params.append(
+                "operator",
+                String(operator)
+            );
 
-                mobile:
-                    String(number),
 
-                operator:
-                    String(operator),
+            params.append(
+                "ref_id",
+                referenceId
+            );
 
-                refId:
-                    referenceId,
 
-                txnId:
-                    data.txn_id ||
-                    "",
+            if (field1)
+                params.append(
+                    "field1",
+                    String(field1)
+                );
+
+
+            if (field2)
+                params.append(
+                    "field2",
+                    String(field2)
+                );
+
+
+            if (field3)
+                params.append(
+                    "field3",
+                    String(field3)
+                );
+
+
+            if (field4)
+                params.append(
+                    "field4",
+                    String(field4)
+                );
+
+
+            if (field5)
+                params.append(
+                    "field5",
+                    String(field5)
+                );
+
+
+            params.append(
+                "pin",
+                EPAY_PIN
+            );
+
+
+            // ----------------------------------------------
+            // CALL EPAYYATRA
+            // ----------------------------------------------
+
+            const response =
+                await fetch(
+                    `${apiUrl}?${params.toString()}`,
+                    {
+
+                        method:
+                            "GET",
+
+                        headers: {
+
+                            "Accept":
+                                "application/json"
+
+                        }
+
+                    }
+                );
+
+
+            const text =
+                await response.text();
+
+
+            // ----------------------------------------------
+            // PARSE RESPONSE
+            // ----------------------------------------------
+
+            let data;
+
+
+            try {
+
+                data =
+                    JSON.parse(text);
+
+            } catch {
+
+                data = {
+
+                    raw_response:
+                        text
+
+                };
+
+            }
+
+
+            // ----------------------------------------------
+            // RETURN
+            // ----------------------------------------------
+
+            return res.status(
+                response.ok
+                    ? 200
+                    : 502
+            ).json({
+
+                success:
+                    response.ok,
 
                 status:
-                    "SUCCESS",
-
-                createdAt:
-                    new Date().toISOString()
-
-            };
-
-            const list =
-                walletTransactions.get(
-                    userId
-                ) || [];
-
-            list.unshift(
-                transaction
-            );
-
-            walletTransactions.set(
-                userId,
-                list
-            );
-
-            return res.json({
-
-                success: true,
-
-                status:
-                    "Success",
-
-                message:
-                    data.message ||
-                    "Recharge successful",
+                    data.status ||
+                    "Unknown",
 
                 number:
+                    data.number ||
                     number,
 
                 amount:
-                    rechargeAmount,
+                    data.amount ||
+                    amount,
 
                 operator:
+                    data.operator ||
                     operator,
 
                 ref_id:
@@ -988,68 +1232,48 @@ app.post("/api/recharge", async (req, res) => {
                     data.txn_id ||
                     "",
 
+                opt_id:
+                    data.opt_id ||
+                    "",
+
                 balance:
-                    getWallet(userId)
-                        .toFixed(2),
+                    data.balance ||
+                    "",
+
+                message:
+                    data.message ||
+                    "Recharge response received",
 
                 provider_response:
                     data
 
             });
 
+        } catch (error) {
+
+            console.error(
+                "Recharge Error:",
+                error
+            );
+
+            return res.status(500).json({
+
+                success: false,
+
+                status:
+                    "Error",
+
+                message:
+                    error.message ||
+                    "Recharge server error"
+
+            });
+
         }
 
-        // ----------------------------------------------
-        // FAILED → NO WALLET DEDUCTION
-        // ----------------------------------------------
-
-        return res.status(400).json({
-
-            success: false,
-
-            status:
-                providerStatus ||
-                "Failed",
-
-            message:
-                data.message ||
-                "Recharge failed. Wallet balance was not deducted.",
-
-            balance:
-                getWallet(userId)
-                    .toFixed(2),
-
-            provider_response:
-                data
-
-        });
-
-    } catch (error) {
-
-        console.error(
-            "Recharge Error:",
-            error
-        );
-
-        return res.status(500).json({
-
-            success: false,
-
-            status:
-                "Error",
-
-            message:
-                error.message ||
-                "Recharge server error",
-
-            note:
-                "Wallet was not deducted."
-
-        });
-
     }
+);
 
-});
 
 // ======================================================
 // EPAYYATRA CALLBACK
@@ -1061,9 +1285,9 @@ app.all(
 
         console.log(
             "EPAYYATRA CALLBACK:",
-            req.body ||
-            req.query
+            req.body || req.query
         );
+
 
         res.json({
 
@@ -1077,8 +1301,9 @@ app.all(
     }
 );
 
+
 // ======================================================
-// START
+// START SERVER
 // ======================================================
 
 app.listen(
